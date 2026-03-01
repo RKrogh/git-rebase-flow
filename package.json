@@ -1,0 +1,44 @@
+{
+  "name": "rebaseflow",
+  "displayName": "RebaseFlow",
+  "description": "Visual git rebase with tree view and conflict navigation",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["SCM Providers"],
+  "activationEvents": ["workspaceContains:.git"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "views": {
+      "scm": [
+        {
+          "id": "rebaseflow.tree",
+          "name": "RebaseFlow",
+          "when": "rebaseflow.isRebasing"
+        }
+      ]
+    },
+    "commands": [
+      { "command": "rebaseflow.continue", "title": "RebaseFlow: Continue Rebase" },
+      { "command": "rebaseflow.skip",     "title": "RebaseFlow: Skip Commit" },
+      { "command": "rebaseflow.abort",    "title": "RebaseFlow: Abort Rebase" },
+      { "command": "rebaseflow.openPanel","title": "RebaseFlow: Open Panel" }
+    ],
+    "menus": {
+      "scm/title": [
+        { "command": "rebaseflow.continue", "when": "rebaseflow.isRebasing", "group": "rebaseflow@1" },
+        { "command": "rebaseflow.skip",     "when": "rebaseflow.isRebasing", "group": "rebaseflow@2" },
+        { "command": "rebaseflow.abort",    "when": "rebaseflow.isRebasing", "group": "rebaseflow@3" }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "node out/test/runTests.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}
