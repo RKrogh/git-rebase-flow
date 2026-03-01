@@ -1,5 +1,7 @@
 # RebaseFlow
 
+<img width="1319" height="824" alt="image" src="https://github.com/user-attachments/assets/e074d49e-db32-481c-ac42-8f8e699255e0" />
+
 A VS Code extension that makes `git rebase` not suck.
 
 Persistent side panel showing the full rebase graph — where you've been, where you are, and what's left — with controls to continue, skip, or abort without leaving the editor.
