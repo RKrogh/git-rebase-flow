@@ -29,6 +29,8 @@ git clone <your-repo-url>
 cd rebaseflow
 npm install
 npm run compile
+npx @vscode/vsce package --allow-missing-repository
+code --install-extension rebaseflow-0.1.0.vsix
 ```
 
 Then in VS Code:
