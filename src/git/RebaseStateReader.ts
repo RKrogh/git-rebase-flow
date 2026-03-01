@@ -1,25 +1,35 @@
 import { GitCli } from './GitCli';
-import { CommitInfo, RebaseState, emptyState } from '../models/RebaseState';
+import { CommitInfo, ConflictCausation, RebaseState, emptyState } from '../models/RebaseState';
 
-// git log format: hash|shortHash|author|date|subject
-const LOG_FORMAT = '--format=%H|%h|%an|%ar|%s';
+// git log format: hash<SOH>shortHash<SOH>author<SOH>date<SOH>subject
+// Uses ASCII SOH (%x01) as separator — pipe `|` gets interpreted as shell pipe on Windows cmd.exe
+const LOG_SEP = '\x01';
+const LOG_FORMAT = '--format=%H%x01%h%x01%an%x01%ar%x01%s';
 
 export class RebaseStateReader {
   constructor(private readonly git: GitCli) {}
 
   read(): RebaseState {
-    // rebase-merge dir is the canonical indicator of an in-progress rebase
-    // Use gitFileExists to support worktrees where the git dir differs from .git
     if (!this.git.gitFileExists('rebase-merge')) {
       return { ...emptyState };
     }
 
     const sourceBranch = this.readBranchName();
-    const targetRef    = this.readTargetRef();
+    const ontoHash     = this.readOntoHash();
+    const targetRef    = this.resolveTargetName(ontoHash);
     const stoppedSha   = this.git.readGitFile('rebase-merge/stopped-sha');
 
-    const todoLines  = this.parseTodoFile('rebase-merge/git-rebase-todo');
-    const doneLines  = this.parseTodoFile('rebase-merge/done');
+    const todoLines = this.parseTodoFile('rebase-merge/git-rebase-todo');
+    let   doneLines = this.parseTodoFile('rebase-merge/done');
+
+    // Fix: during a conflict, the stopped commit is already in 'done'.
+    // Remove it from done — we'll show it as currentCommit instead.
+    if (stoppedSha && doneLines.length > 0) {
+      const lastDone = doneLines[doneLines.length - 1];
+      if (lastDone.hash === stoppedSha || stoppedSha.startsWith(lastDone.hash)) {
+        doneLines = doneLines.slice(0, -1);
+      }
+    }
 
     const doneCommits    = this.enrichCommits(doneLines, 'done');
     const pendingCommits = this.enrichCommits(todoLines, 'pending');
@@ -35,10 +45,30 @@ export class RebaseStateReader {
       };
     }
 
+    // The original feature branch tip before rebase started
+    const origHead = this.git.readGitFile('rebase-merge/orig-head') ?? '';
+
     // Base commits: what's on target above the fork point
-    const forkPointHash = this.getForkPoint(sourceBranch, targetRef);
+    // Use raw onto sha for range queries, not the friendly name
+    const forkPointHash = this.getForkPoint(sourceBranch, ontoHash, origHead);
     const baseCommits   = forkPointHash
-      ? this.getBaseCommits(targetRef, forkPointHash)
+      ? this.getBaseCommits(ontoHash, forkPointHash)
+      : [];
+
+    console.log('[RebaseFlow] Fork detection:', {
+      source: sourceBranch,
+      onto: ontoHash?.substring(0, 7),
+      origHead: origHead?.substring(0, 7),
+      forkPoint: forkPointHash?.substring(0, 7),
+      forkEqualsOnto: forkPointHash === ontoHash,
+      baseCommitCount: baseCommits.length,
+    });
+
+    // Map new hashes onto done commits (rebase creates new cherry-picked copies)
+    this.assignNewHashes(doneCommits, ontoHash);
+
+    const conflictCausation = currentCommit?.conflictFiles
+      ? this.computeConflictCausation(currentCommit.conflictFiles, baseCommits)
       : [];
 
     const totalCount = doneCommits.length + (currentCommit ? 1 : 0) + pendingCommits.length;
@@ -48,11 +78,14 @@ export class RebaseStateReader {
       isRebasing: true,
       sourceBranch,
       targetRef,
+      ontoHash,
+      origHead,
       forkPointHash: forkPointHash ?? '',
       baseCommits,
       doneCommits,
       currentCommit,
       pendingCommits,
+      conflictCausation,
       totalCount,
       doneCount,
     };
@@ -61,39 +94,110 @@ export class RebaseStateReader {
   // ── private helpers ────────────────────────────────────────────────────────
 
   private readBranchName(): string {
-    // head-name contains refs/heads/feature/foo — strip the prefix
     const raw = this.git.readGitFile('rebase-merge/head-name') ?? 'UNKNOWN';
     return raw.replace(/^refs\/heads\//, '');
   }
 
-  private readTargetRef(): string {
-    // onto contains the target commit sha; try to resolve to a friendly name
-    const onto = this.git.readGitFile('rebase-merge/onto');
-    if (!onto) { return 'unknown'; }
-    const name = this.git.tryExec(['name-rev', '--name-only', '--no-undefined', onto]);
-    return name ?? onto.substring(0, 7);
+  /** Read the raw onto sha — the commit we're rebasing onto. */
+  private readOntoHash(): string {
+    return this.git.readGitFile('rebase-merge/onto') ?? '';
   }
 
-  private getForkPoint(source: string, target: string): string | null {
-    return this.git.tryExec(['merge-base', `refs/heads/${source}`, target]);
+  /** Resolve a sha to a friendly branch name for display only. */
+  private resolveTargetName(sha: string): string {
+    if (!sha) { return 'unknown'; }
+    const name = this.git.tryExec(['name-rev', '--name-only', '--no-undefined', sha]);
+    // name-rev can return things like "master~0" — strip the ~0
+    if (name) { return name.replace(/~0$/, ''); }
+    return sha.substring(0, 7);
   }
 
-  private getBaseCommits(targetRef: string, forkPoint: string): CommitInfo[] {
-    const raw = this.git.tryExec([
-      'log', LOG_FORMAT, `${forkPoint}..${targetRef}`,
-    ]);
+  private getForkPoint(source: string, ontoSha: string, origHead: string): string | null {
+    // Strategy 1: merge-base with the branch ref
+    const mb1 = this.git.tryExec(['merge-base', `refs/heads/${source}`, ontoSha]);
+    if (mb1 && mb1 !== ontoSha) { return mb1; }
+
+    // Strategy 2: use orig-head (feature tip saved at rebase start)
+    // This helps when refs/heads/<source> was modified by a prior rebase
+    if (origHead) {
+      const mb2 = this.git.tryExec(['merge-base', origHead, ontoSha]);
+      if (mb2 && mb2 !== ontoSha) { return mb2; }
+    }
+
+    // Strategy 3: --fork-point uses reflog for more accurate detection
+    const mb3 = this.git.tryExec(['merge-base', '--fork-point', ontoSha, `refs/heads/${source}`]);
+    if (mb3 && mb3 !== ontoSha) { return mb3; }
+
+    console.log('[RebaseFlow] Fork point detection: all strategies returned onto hash or null.',
+      { mb1: mb1?.substring(0, 7), mb2: origHead ? 'tried' : 'no orig-head', mb3: mb3?.substring(0, 7) });
+
+    // Return whatever we got — forkPoint == onto means no divergent commits
+    return mb1 ?? null;
+  }
+
+  private getBaseCommits(ontoSha: string, forkPoint: string): CommitInfo[] {
+    // Use raw shas for the range query — no ambiguity
+    const range = `${forkPoint}..${ontoSha}`;
+    const raw = this.git.tryExec(['log', LOG_FORMAT, range]);
+
+    console.log('[RebaseFlow] getBaseCommits:', {
+      range: `${forkPoint.substring(0, 7)}..${ontoSha.substring(0, 7)}`,
+      rawLength: raw?.length ?? 'null',
+      rawPreview: raw ? raw.substring(0, 80) : 'null',
+    });
+
     if (!raw) { return []; }
-    return raw.split('\n').filter(Boolean).map(line => ({
-      ...this.parseLine(line),
-      status: 'base' as const,
-    }));
+    return raw.split('\n').filter(Boolean).map(line => {
+      const commit: CommitInfo = {
+        ...this.parseLine(line),
+        status: 'base' as const,
+      };
+      commit.changedFiles = this.getChangedFiles(commit.hash);
+      return commit;
+    });
   }
 
   /**
-   * Parses git-rebase-todo / done files.
-   * Format per line: "pick <sha> <message>"
-   * We ignore `drop`, `fixup`, `exec` lines for display purposes.
+   * After rebase applies commits, HEAD contains the new cherry-picked copies.
+   * `git log onto..HEAD` gives us the new commits in reverse order.
+   * We match them 1:1 with done commits to assign newHash/newShortHash.
    */
+  private assignNewHashes(doneCommits: CommitInfo[], ontoSha: string): void {
+    if (doneCommits.length === 0 || !ontoSha) { return; }
+
+    const raw = this.git.tryExec(['log', '--format=%H%x01%h', `${ontoSha}..HEAD`]);
+    if (!raw) { return; }
+
+    // git log returns newest-first; done commits are oldest-first — reverse to align
+    const newCommits = raw.split('\n').filter(Boolean).reverse();
+
+    for (let i = 0; i < Math.min(doneCommits.length, newCommits.length); i++) {
+      const parts = newCommits[i].split(LOG_SEP);
+      doneCommits[i].newHash = parts[0];
+      doneCommits[i].newShortHash = parts[1];
+    }
+  }
+
+  private getChangedFiles(hash: string): string[] {
+    const raw = this.git.tryExec(['diff-tree', '--no-commit-id', '--name-only', '-r', hash]);
+    if (!raw) { return []; }
+    return raw.split('\n').filter(Boolean);
+  }
+
+  private computeConflictCausation(
+    conflictFiles: string[],
+    baseCommits: CommitInfo[],
+  ): ConflictCausation[] {
+    if (!conflictFiles.length || !baseCommits.length) { return []; }
+
+    return conflictFiles.map(file => {
+      const baseCommitHashes = baseCommits
+        .filter(bc => bc.changedFiles?.includes(file))
+        .map(bc => bc.hash);
+      return { file, baseCommitHashes };
+    });
+  }
+
   private parseTodoFile(relativePath: string): Array<{ hash: string; message: string }> {
     const content = this.git.readGitFile(relativePath);
     if (!content) { return []; }
@@ -123,7 +227,6 @@ export class RebaseStateReader {
     const raw = this.git.tryExec(['log', '-1', LOG_FORMAT, hash]);
     if (raw) { return { ...this.parseLine(raw), status: 'pending' }; }
 
-    // Fallback: commit might not be in log yet (e.g. stopped-sha during conflict)
     return {
       hash,
       shortHash: hash.substring(0, 7),
@@ -135,19 +238,18 @@ export class RebaseStateReader {
   }
 
   private parseLine(line: string): CommitInfo {
-    const [hash, shortHash, author, date, ...rest] = line.split('|');
+    const [hash, shortHash, author, date, ...rest] = line.split(LOG_SEP);
     return {
       hash:      hash ?? '',
       shortHash: shortHash ?? '',
       author:    author ?? '',
       date:      date ?? '',
-      message:   rest.join('|'),   // subject may contain pipes
+      message:   rest.join(LOG_SEP),
       status:    'pending',
     };
   }
 
   private getConflictFiles(): string[] {
-    // git status --porcelain: lines starting with 'UU', 'AA', 'DD', etc. are conflicts
     const raw = this.git.tryExec(['status', '--porcelain']);
     if (!raw) { return []; }
     return raw
