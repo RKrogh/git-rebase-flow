@@ -4,6 +4,7 @@ import { RebaseTreeProvider }  from './views/RebaseTreeProvider';
 import { RebasePanelWebview }  from './views/RebasePanelWebview';
 import { registerCommands }    from './commands';
 import { RebaseState }         from './models/RebaseState';
+import { GitCli }              from './git/GitCli';
 
 // Context key used by `when` clauses in package.json
 const CTX_IS_REBASING = 'rebaseflow.isRebasing';
@@ -13,9 +14,11 @@ export function activate(context: vscode.ExtensionContext): void {
   if (!repoRoot) { return; }
 
   // ── Core components ────────────────────────────────────────────────────
+  const git      = new GitCli(repoRoot);
   const watcher  = new RebaseStateWatcher(repoRoot);
   const tree     = new RebaseTreeProvider();
   const webview  = new RebasePanelWebview();
+  webview.setGit(git);
 
   // ── Register sidebar tree view ─────────────────────────────────────────
   const treeView = vscode.window.createTreeView('rebaseflow.tree', {
@@ -24,7 +27,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   // ── Register commands ──────────────────────────────────────────────────
-  registerCommands(context);
+  registerCommands(context, watcher);
 
   // ── React to state changes ────────────────────────────────────────────
   watcher.onStateChanged((state: RebaseState) => {

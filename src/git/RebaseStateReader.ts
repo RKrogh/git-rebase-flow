@@ -1,5 +1,5 @@
 import { GitCli } from './GitCli';
-import { CommitInfo, ConflictCausation, RebaseState, emptyState } from '../models/RebaseState';
+import { CommitInfo, ConflictCausation, RebaseAction, RebaseState, emptyState } from '../models/RebaseState';
 
 // git log format: hash<SOH>shortHash<SOH>author<SOH>date<SOH>subject
 // Uses ASCII SOH (%x01) as separator — pipe `|` gets interpreted as shell pipe on Windows cmd.exe
@@ -24,9 +24,11 @@ export class RebaseStateReader {
 
     // Fix: during a conflict, the stopped commit is already in 'done'.
     // Remove it from done — we'll show it as currentCommit instead.
+    let currentAction: RebaseAction | undefined;
     if (stoppedSha && doneLines.length > 0) {
       const lastDone = doneLines[doneLines.length - 1];
       if (lastDone.hash === stoppedSha || stoppedSha.startsWith(lastDone.hash)) {
+        currentAction = lastDone.action;
         doneLines = doneLines.slice(0, -1);
       }
     }
@@ -41,6 +43,7 @@ export class RebaseStateReader {
       currentCommit = {
         ...this.fetchCommitInfo(stoppedSha),
         status: 'current',
+        action: currentAction,
         conflictFiles,
       };
     }
@@ -198,7 +201,7 @@ export class RebaseStateReader {
     });
   }
 
-  private parseTodoFile(relativePath: string): Array<{ hash: string; message: string }> {
+  private parseTodoFile(relativePath: string): Array<{ action: RebaseAction; hash: string; message: string }> {
     const content = this.git.readGitFile(relativePath);
     if (!content) { return []; }
 
@@ -207,19 +210,20 @@ export class RebaseStateReader {
       .filter(l => /^(pick|reword|edit|squash|fixup)\s/i.test(l))
       .map(l => {
         const parts = l.split(/\s+/);
+        const action  = parts[0].toLowerCase() as RebaseAction;
         const hash    = parts[1] ?? '';
         const message = parts.slice(2).join(' ');
-        return { hash, message };
+        return { action, hash, message };
       });
   }
 
   private enrichCommits(
-    lines: Array<{ hash: string; message: string }>,
+    lines: Array<{ action: RebaseAction; hash: string; message: string }>,
     status: CommitInfo['status']
   ): CommitInfo[] {
-    return lines.map(({ hash, message }) => {
+    return lines.map(({ action, hash, message }) => {
       const info = this.fetchCommitInfo(hash);
-      return { ...info, message: message || info.message, status };
+      return { ...info, message: message || info.message, status, action };
     });
   }
 

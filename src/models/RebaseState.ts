@@ -1,4 +1,5 @@
 export type CommitStatus = 'base' | 'done' | 'current' | 'pending';
+export type RebaseAction = 'pick' | 'reword' | 'edit' | 'squash' | 'fixup' | 'drop';
 
 export interface CommitInfo {
   hash: string;           // original full sha (from the feature branch)
@@ -9,8 +10,21 @@ export interface CommitInfo {
   author: string;
   date: string;
   status: CommitStatus;
+  action?: RebaseAction;     // the rebase verb (pick/squash/etc.) — preserved from todo file
   conflictFiles?: string[];  // populated when status === 'current'
   changedFiles?: string[];   // files touched by this commit
+}
+
+/** A single edit in the user's modified todo list (write path) */
+export interface PendingEdit {
+  hash: string;
+  action: RebaseAction;
+  message: string;
+}
+
+/** Full payload sent from webview when applying todo edits */
+export interface TodoEditPayload {
+  edits: PendingEdit[];  // ordered — this IS the new todo sequence
 }
 
 export interface ConflictCausation {

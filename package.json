@@ -21,7 +21,8 @@
       { "command": "rebaseflow.continue", "title": "RebaseFlow: Continue Rebase" },
       { "command": "rebaseflow.skip",     "title": "RebaseFlow: Skip Commit" },
       { "command": "rebaseflow.abort",    "title": "RebaseFlow: Abort Rebase" },
-      { "command": "rebaseflow.openPanel","title": "RebaseFlow: Open Panel" }
+      { "command": "rebaseflow.openPanel","title": "RebaseFlow: Open Panel" },
+      { "command": "rebaseflow.applyTodoEdits", "title": "RebaseFlow: Apply Todo Edits" }
     ],
     "menus": {
       "scm/title": [

@@ -1,8 +1,15 @@
 import * as vscode from 'vscode';
 import { RebaseState, CommitInfo, ConflictCausation } from '../models/RebaseState';
+import { GitCli } from '../git/GitCli';
 
 export class RebasePanelWebview implements vscode.Disposable {
   private panel: vscode.WebviewPanel | null = null;
+  private isEditing = false;
+  private git: GitCli | null = null;
+  private currentState: RebaseState | null = null;
+  private tmpDir: string | null = null;
+
+  setGit(git: GitCli): void { this.git = git; }
 
   show(context: vscode.ExtensionContext, state: RebaseState): void {
     if (this.panel) {
@@ -18,15 +25,24 @@ export class RebasePanelWebview implements vscode.Disposable {
           localResourceRoots: [context.extensionUri],
         }
       );
-      this.panel.onDidDispose(() => { this.panel = null; });
+      this.panel.onDidDispose(() => { this.panel = null; this.isEditing = false; });
       this.panel.webview.onDidReceiveMessage(msg => {
-        if (msg.command === 'openFile' && msg.file) {
-          const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-          if (root) {
-            vscode.window.showTextDocument(vscode.Uri.joinPath(root, msg.file));
-          }
-        } else {
-          vscode.commands.executeCommand(`rebaseflow.${msg.command}`);
+        switch (msg.command) {
+          case 'openFile':
+            if (msg.file) { this.openConflictFile(msg.file); }
+            break;
+          case 'enterEditMode':
+            this.isEditing = true;
+            break;
+          case 'exitEditMode':
+            this.isEditing = false;
+            break;
+          case 'editTodo':
+            this.isEditing = false;
+            vscode.commands.executeCommand('rebaseflow.applyTodoEdits', { edits: msg.edits });
+            break;
+          default:
+            vscode.commands.executeCommand(`rebaseflow.${msg.command}`);
         }
       });
     }
@@ -34,12 +50,98 @@ export class RebasePanelWebview implements vscode.Disposable {
   }
 
   update(state: RebaseState): void {
-    if (!this.panel) { return; }
+    if (!this.panel || this.isEditing) { return; }
+    this.currentState = state;
     this.panel.webview.html = this.buildHtml(state);
   }
 
   close(): void { this.panel?.dispose(); this.panel = null; }
-  dispose(): void { this.close(); }
+
+  dispose(): void {
+    this.close();
+    this.cleanupTmpDir();
+  }
+
+  // ── Merge editor with labeled panes ─────────────────────────────────────
+
+  private async openConflictFile(file: string): Promise<void> {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) { return; }
+
+    const fileUri = vscode.Uri.joinPath(root, file);
+    const s = this.currentState;
+
+    // Attempt 1: _open.mergeEditor with custom labels (internal API)
+    if (this.git && s) {
+      const base   = this.git.readIndexStage(file, 1);
+      const ours   = this.git.readIndexStage(file, 2);
+      const theirs = this.git.readIndexStage(file, 3);
+
+      if (base !== null && ours !== null && theirs !== null) {
+        const tmpFiles = this.writeTmpFiles(file, base, ours, theirs);
+        const commitMsg = s.currentCommit?.message ?? '';
+        const shortMsg = commitMsg.length > 40
+          ? commitMsg.substring(0, 37) + '...' : commitMsg;
+
+        try {
+          const available = await vscode.commands.getCommands(true);
+          if (available.includes('_open.mergeEditor')) {
+            await vscode.commands.executeCommand('_open.mergeEditor', {
+              $type: 'full',
+              base:   { uri: vscode.Uri.file(tmpFiles.base),   title: 'Base (common ancestor)' },
+              input1: { uri: vscode.Uri.file(tmpFiles.ours),   title: `\uD83D\uDD35 Target (${s.targetRef})`, description: 'current HEAD — ours' },
+              input2: { uri: vscode.Uri.file(tmpFiles.theirs), title: `\uD83D\uDFE0 Your commit \u00B7 ${shortMsg}`, description: `${s.sourceBranch} — theirs` },
+              result: fileUri,
+            });
+            return;
+          }
+        } catch (err) {
+          console.warn('RebaseFlow: _open.mergeEditor failed:', err);
+        }
+      }
+    }
+
+    // Attempt 2: git extension's merge editor (reliable, no custom labels)
+    try {
+      await vscode.commands.executeCommand('git.openMergeEditor', fileUri);
+      return;
+    } catch {
+      // git extension might not expose this command
+    }
+
+    // Attempt 3: open the file — VS Code shows inline merge decorations for conflicted files
+    await vscode.window.showTextDocument(fileUri);
+  }
+
+  private writeTmpFiles(file: string, base: string, ours: string, theirs: string): { base: string; ours: string; theirs: string } {
+    const fs   = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const os   = require('os') as typeof import('os');
+
+    if (!this.tmpDir || !fs.existsSync(this.tmpDir)) {
+      this.tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rebaseflow-'));
+    }
+
+    const safeName = file.replace(/[/\\]/g, '_');
+    const basePath   = path.join(this.tmpDir, `base_${safeName}`);
+    const oursPath   = path.join(this.tmpDir, `target_${safeName}`);
+    const theirsPath = path.join(this.tmpDir, `yours_${safeName}`);
+
+    fs.writeFileSync(basePath, base, 'utf8');
+    fs.writeFileSync(oursPath, ours, 'utf8');
+    fs.writeFileSync(theirsPath, theirs, 'utf8');
+
+    return { base: basePath, ours: oursPath, theirs: theirsPath };
+  }
+
+  private cleanupTmpDir(): void {
+    if (!this.tmpDir) { return; }
+    try {
+      const fs = require('fs') as typeof import('fs');
+      fs.rmSync(this.tmpDir, { recursive: true, force: true });
+    } catch { /* best-effort */ }
+    this.tmpDir = null;
+  }
 
   // ── HTML ───────────────────────────────────────────────────────────────
 
@@ -56,15 +158,20 @@ export class RebasePanelWebview implements vscode.Disposable {
     }
 
     const rebasedSection = this.buildRebasedSection(s, causationByFile);
-    const divergenceSection = this.buildDivergenceSection(s, conflictBaseHashes);
+    const pendingSection = this.buildPendingSection(s);
+    const divergenceSection = this.buildDivergenceSection(s, conflictBaseHashes, s.pendingCommits.length > 0);
     const forkSection = this.buildForkSection(s);
 
     // Separator: dashed line across, main rail passes through at column 2
+    // Feature rail only bridges when both pending (above) and originals (below) exist
+    const hasOriginals = s.doneCommits.length > 0 || s.currentCommit !== null;
+    const hasPending = s.pendingCommits.length > 0;
+    const needsFeatBridge = hasOriginals && hasPending;
     const separator = `<div class="separator-grid">
       <div></div>
       <div><div class="rail rail-main rail-no-node separator-rail"></div></div>
       <div></div>
-      <div></div>
+      <div>${needsFeatBridge ? '<div class="rail rail-feature rail-no-node separator-rail"></div>' : ''}</div>
       <div></div>
     </div>`;
 
@@ -90,6 +197,7 @@ export class RebasePanelWebview implements vscode.Disposable {
 
 <div class="graph">
   ${rebasedSection}
+  ${pendingSection}
   ${separator}
   ${divergenceSection}
   ${forkSection}
@@ -107,6 +215,95 @@ export class RebasePanelWebview implements vscode.Disposable {
 const vscode = acquireVsCodeApi();
 function send(cmd) { vscode.postMessage({ command: cmd }); }
 function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
+
+// ── Edit mode for pending commits ──
+let editMode = false;
+let pendingEdits = [];
+
+function toggleEditMode() {
+  editMode = !editMode;
+  if (editMode) {
+    vscode.postMessage({ command: 'enterEditMode' });
+    initEditMode();
+  } else {
+    vscode.postMessage({ command: 'exitEditMode' });
+  }
+}
+
+function initEditMode() {
+  const rows = document.querySelectorAll('.row-pending');
+  pendingEdits = Array.from(rows).map(r => ({
+    hash: r.dataset.hash,
+    action: r.querySelector('.action-select').value,
+    message: r.querySelector('.pending-msg').textContent
+  }));
+
+  document.getElementById('editControls').style.display = 'flex';
+  document.getElementById('editToggle').textContent = 'Editing...';
+  document.querySelectorAll('.drag-handle').forEach(h => h.classList.add('active'));
+  document.querySelectorAll('.action-select').forEach(s => s.disabled = false);
+  document.querySelectorAll('.row-pending').forEach(r => r.setAttribute('draggable', 'true'));
+
+  setupDragAndDrop();
+}
+
+function setupDragAndDrop() {
+  const list = document.getElementById('pendingList');
+  if (!list) return;
+  let dragSrc = null;
+
+  list.querySelectorAll('.row-pending').forEach(row => {
+    row.addEventListener('dragstart', e => {
+      dragSrc = row;
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    row.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (e.currentTarget !== dragSrc && dragSrc) {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const midY = rect.top + rect.height / 2;
+        if (e.clientY < midY) {
+          list.insertBefore(dragSrc, e.currentTarget);
+        } else {
+          list.insertBefore(dragSrc, e.currentTarget.nextSibling);
+        }
+      }
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      updatePendingEditsFromDom();
+    });
+  });
+}
+
+function updatePendingEditsFromDom() {
+  const rows = document.querySelectorAll('.row-pending');
+  pendingEdits = Array.from(rows).map(r => ({
+    hash: r.dataset.hash,
+    action: r.querySelector('.action-select').value,
+    message: r.querySelector('.pending-msg').textContent
+  }));
+}
+
+function onActionChange(sel) {
+  if (!editMode) return;
+  updatePendingEditsFromDom();
+  const row = sel.closest('.row-pending');
+  row.classList.toggle('row-dropped', sel.value === 'drop');
+}
+
+function applyEdits() {
+  updatePendingEditsFromDom();
+  vscode.postMessage({ command: 'editTodo', edits: pendingEdits });
+  editMode = false;
+}
+
+function cancelEdit() {
+  editMode = false;
+  vscode.postMessage({ command: 'exitEditMode' });
+}
 </script>
 </body>
 </html>`;
@@ -155,7 +352,7 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
                 }).join(', ')}</span>`
               : '';
             return `<div class="file-item file-warn conflict-file-item" onclick="openFile('${this.escJs(f)}')">`
-              + `\u26A1 ${this.esc(f)}${from}</div>`;
+              + `\u26A1 ${this.esc(f)}${from}<span class="resolve-hint">open \u2192</span></div>`;
           }).join('')
         }</div>`;
 
@@ -220,6 +417,70 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
     </div>`;
   }
 
+  // ── Pending section: editable commits above the separator ─────────────
+  // Same 5-column grid; commits sit on the feature rail (cols 4-5).
+  // Edit mode adds drag handles + action dropdowns.
+
+  private buildPendingSection(s: RebaseState): string {
+    if (s.pendingCommits.length === 0) { return ''; }
+
+    const rows: string[] = [];
+    const actions: string[] = ['pick', 'reword', 'edit', 'squash', 'fixup', 'drop'];
+
+    for (let i = 0; i < s.pendingCommits.length; i++) {
+      const c = s.pendingCommits[i];
+      const isTop = i === 0;
+      const action = c.action ?? 'pick';
+
+      const optionsHtml = actions.map(a =>
+        `<option value="${a}"${a === action ? ' selected' : ''}>${a}</option>`
+      ).join('');
+
+      rows.push(`<div class="pending-row row-pending" data-hash="${this.esc(c.hash)}" draggable="false">
+        <div class="gc-main-content"></div>
+        <div class="gc-main-rail"></div>
+        <div class="gc-gutter"></div>
+        <div class="gc-feat-rail">
+          <div class="rail rail-feature ${isTop ? 'rail-cap-top' : ''}">
+            <div class="node node-feature"></div>
+          </div>
+        </div>
+        <div class="gc-feat-content pending-content">
+          <span class="drag-handle" title="Drag to reorder">\u2261</span>
+          <select class="action-select" disabled onchange="onActionChange(this)">${optionsHtml}</select>
+          <span class="hash hash-feature">${this.esc(c.shortHash)}</span>
+          <span class="pending-msg">${this.esc(c.message)}</span>
+        </div>
+      </div>`);
+    }
+
+    return `<div class="section section-pending">
+      <div class="pending-row">
+        <div class="gc-main-content"></div>
+        <div class="gc-main-rail"></div>
+        <div class="gc-gutter"></div>
+        <div class="gc-feat-rail"></div>
+        <div class="gc-feat-content section-label-pending">Pending</div>
+      </div>
+      <div id="pendingList">
+        ${rows.join('\n')}
+      </div>
+      <div class="pending-row pending-controls-row">
+        <div class="gc-main-content"></div>
+        <div class="gc-main-rail"></div>
+        <div class="gc-gutter"></div>
+        <div class="gc-feat-rail"></div>
+        <div class="gc-feat-content edit-controls-wrap">
+          <button class="btn btn-edit" id="editToggle" onclick="toggleEditMode()">Edit</button>
+          <div class="edit-controls" id="editControls" style="display:none;">
+            <button class="btn btn-apply" onclick="applyEdits()">Apply Changes</button>
+            <button class="btn btn-cancel" onclick="cancelEdit()">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }
+
   // ── Section 4: Divergence (main + feature side by side) ───────────────
   // 5-column grid: [main-content 1fr] [main-rail 32px] [gutter] [feat-rail 32px] [feat-content 1fr]
   // Text flanks outward: target text left of main rail, feature text right of feature rail.
@@ -227,12 +488,12 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
   private buildDivergenceSection(
     s: RebaseState,
     conflictBaseHashes: Set<string>,
+    hasPendingAbove: boolean,
   ): string {
-    // All originals: oldest first → reverse for newest-at-top
+    // Only done + current originals (pending commits are in their own section above)
     const allOriginals: CommitInfo[] = [
       ...s.doneCommits,
       ...(s.currentCommit ? [s.currentCommit] : []),
-      ...s.pendingCommits,
     ].reverse();
 
     const maxRows = Math.max(s.baseCommits.length, allOriginals.length, 1);
@@ -246,8 +507,11 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
       <div class="rail rail-main rail-no-node ${nothingAbove ? 'rail-cap-top' : ''}"></div>
     </div>`);
     gridRows.push('<div class="gc-gutter"></div>');
-    gridRows.push('<div class="gc-feat-rail"></div>');
-    gridRows.push(`<div class="gc-feat-content div-hdr">Original commits</div>`);
+    // Feature rail in header only when pending section bridges above; otherwise first commit caps itself
+    gridRows.push(`<div class="gc-feat-rail">${
+      (allOriginals.length > 0 && hasPendingAbove) ? '<div class="rail rail-feature rail-no-node"></div>' : ''
+    }</div>`);
+    gridRows.push(`<div class="gc-feat-content div-hdr">${allOriginals.length > 0 ? 'Original commits' : ''}</div>`);
 
     for (let i = 0; i < maxRows; i++) {
       // ── Main content + rail (columns 1-2) ──
@@ -321,8 +585,9 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
           : isCurrent ? 'row-waning'
           : '';
 
+        const featCapTop = (isTop && !hasPendingAbove) ? 'rail-cap-top' : '';
         gridRows.push(`<div class="gc-feat-rail ${rowAnim}">
-          <div class="rail rail-feature ${isTop ? 'rail-cap-top' : ''}">
+          <div class="rail rail-feature ${featCapTop}">
             <div class="node ${nodeCls}"></div>
           </div>
         </div>`);
@@ -620,15 +885,33 @@ body {
 .debug-warn { color: var(--warn); opacity: 1; }
 
 /* ── File lists ── */
-.file-list { margin-top: 3px; }
+.file-list { margin-top: 5px; display: flex; flex-direction: column; gap: 3px; }
 .file-item {
   font-size: 11px;
   font-family: var(--vscode-editor-font-family);
   padding: 1px 4px; border-radius: 2px;
 }
 .file-warn { color: var(--warn); }
-.conflict-file-item { cursor: pointer; transition: background .12s; }
-.conflict-file-item:hover { background: rgba(240,96,96,.1); }
+.conflict-file-item {
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+  padding: 4px 8px;
+  border: 1px solid rgba(240,96,96,.3);
+  border-radius: 4px;
+  background: rgba(240,96,96,.06);
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.conflict-file-item:hover {
+  background: rgba(240,96,96,.15);
+  border-color: rgba(240,96,96,.6);
+}
+.conflict-file-item:active {
+  background: rgba(240,96,96,.25);
+}
+.conflict-file-item .resolve-hint {
+  font-size: 9px; color: var(--muted);
+  margin-left: auto; opacity: .7;
+}
 .caused-by { font-size: 10px; color: var(--muted); }
 .causation-hint {
   font-size: 10px; color: var(--muted); font-style: italic;
@@ -669,6 +952,85 @@ body {
   display: grid;
   grid-template-columns: 1fr var(--rail-w) 12px var(--rail-w) 1fr;
 }
+
+/* ── Pending section ── */
+.pending-row {
+  display: grid;
+  grid-template-columns: 1fr var(--rail-w) 12px var(--rail-w) 1fr;
+  align-items: stretch;
+  min-height: 36px;
+}
+.section-label-pending {
+  font-size: 10px; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted);
+  padding: 6px 0 4px 8px;
+  align-self: end;
+}
+.pending-content {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 0 4px 8px;
+  min-width: 0;
+}
+.pending-msg {
+  font-size: 12px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; min-width: 0;
+}
+
+/* Drag handle */
+.drag-handle {
+  font-size: 16px; cursor: default; color: var(--muted);
+  opacity: .3; user-select: none; flex-shrink: 0;
+  transition: opacity .15s;
+}
+.drag-handle.active {
+  opacity: 1; cursor: grab; color: var(--feature);
+}
+
+/* Action dropdown */
+.action-select {
+  font-family: var(--vscode-font-family);
+  font-size: 11px; padding: 1px 4px;
+  background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 2px;
+  flex-shrink: 0; cursor: default;
+  opacity: .5;
+}
+.action-select:not(:disabled) {
+  opacity: 1; cursor: pointer;
+  border-color: var(--feature);
+}
+
+/* Drag states */
+.row-pending.dragging { opacity: .4; }
+.row-pending[draggable="true"] { cursor: grab; }
+.row-dropped .pending-msg { text-decoration: line-through; opacity: .4; }
+.row-dropped .hash { opacity: .4; }
+
+/* Edit controls */
+.pending-controls-row { min-height: auto; padding-bottom: 4px; }
+.edit-controls-wrap {
+  display: flex; gap: 6px; align-items: center;
+  padding: 4px 0 4px 8px;
+}
+.edit-controls { display: flex; gap: 6px; }
+.btn-edit {
+  border-color: var(--feature); color: var(--feature);
+  background: rgba(232,148,58,.08);
+  font-size: 11px; padding: 3px 10px;
+}
+.btn-edit:hover { background: rgba(232,148,58,.18); }
+.btn-apply {
+  border-color: var(--done); color: #000;
+  background: var(--done); font-weight: 600;
+  font-size: 11px; padding: 3px 10px;
+}
+.btn-apply:hover { filter: brightness(1.1); }
+.btn-cancel {
+  border-color: var(--border); color: var(--muted);
+  background: transparent;
+  font-size: 11px; padding: 3px 10px;
+}
+.btn-cancel:hover { background: rgba(200,200,200,.08); }
 
 /* ── Controls ── */
 .controls {
