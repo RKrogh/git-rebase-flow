@@ -51,15 +51,28 @@ export class RebasePanelWebview implements vscode.Disposable {
 
   update(state: RebaseState): void {
     if (!this.panel || this.isEditing) { return; }
+
+    // Close stale merge editors when the conflict commit changes
+    // (conflict resolved, moved to next commit, or rebase step advanced)
+    const prevHash = this.currentState?.currentCommit?.hash;
+    const nextHash = state.currentCommit?.hash;
+    if (prevHash && prevHash !== nextHash) {
+      this.closeStaleMergeEditors();
+    }
+
     this.currentState = state;
     this.panel.webview.html = this.buildHtml(state);
   }
 
-  close(): void { this.panel?.dispose(); this.panel = null; }
+  close(): void {
+    this.closeStaleMergeEditors();
+    this.panel?.dispose();
+    this.panel = null;
+    this.cleanupTmpDir();
+  }
 
   dispose(): void {
     this.close();
-    this.cleanupTmpDir();
   }
 
   // ── Merge editor with labeled panes ─────────────────────────────────────
@@ -80,21 +93,27 @@ export class RebasePanelWebview implements vscode.Disposable {
       if (base !== null && ours !== null && theirs !== null) {
         const tmpFiles = this.writeTmpFiles(file, base, ours, theirs);
         const commitMsg = s.currentCommit?.message ?? '';
-        const shortMsg = commitMsg.length > 40
-          ? commitMsg.substring(0, 37) + '...' : commitMsg;
+        const shortMsg = commitMsg.length > 60
+          ? commitMsg.substring(0, 57) + '...' : commitMsg;
 
         try {
-          const available = await vscode.commands.getCommands(true);
-          if (available.includes('_open.mergeEditor')) {
-            await vscode.commands.executeCommand('_open.mergeEditor', {
-              $type: 'full',
-              base:   { uri: vscode.Uri.file(tmpFiles.base),   title: 'Base (common ancestor)' },
-              input1: { uri: vscode.Uri.file(tmpFiles.ours),   title: `\uD83D\uDD35 Target (${s.targetRef})`, description: 'current HEAD — ours' },
-              input2: { uri: vscode.Uri.file(tmpFiles.theirs), title: `\uD83D\uDFE0 Your commit \u00B7 ${shortMsg}`, description: `${s.sourceBranch} — theirs` },
-              result: fileUri,
-            });
-            return;
-          }
+          await vscode.commands.executeCommand('_open.mergeEditor', {
+            base: vscode.Uri.file(tmpFiles.base),
+            input1: {
+              uri: vscode.Uri.file(tmpFiles.ours),
+              title: `\uD83D\uDD35 Target (${s.targetRef})`,
+              description: 'current HEAD',
+              detail: 'ours \u2014 the branch you are rebasing onto',
+            },
+            input2: {
+              uri: vscode.Uri.file(tmpFiles.theirs),
+              title: `\uD83D\uDFE0 ${s.sourceBranch}`,
+              description: shortMsg,
+              detail: 'theirs \u2014 the commit being replayed',
+            },
+            output: fileUri,
+          });
+          return;
         } catch (err) {
           console.warn('RebaseFlow: _open.mergeEditor failed:', err);
         }
@@ -141,6 +160,27 @@ export class RebasePanelWebview implements vscode.Disposable {
       fs.rmSync(this.tmpDir, { recursive: true, force: true });
     } catch { /* best-effort */ }
     this.tmpDir = null;
+  }
+
+  /** Close any merge editor tabs we opened so they don't linger with stale temp files. */
+  private closeStaleMergeEditors(): void {
+    if (!this.tmpDir) { return; }
+    const dir = this.tmpDir;
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        // Duck-type: merge editor tabs have base/input1/input2 URIs
+        // (TabInputTextMerge not in @types/vscode@1.85)
+        const input = tab.input as any;
+        if (input?.base?.fsPath && input?.input1?.fsPath && input?.input2?.fsPath) {
+          const isMine = [input.base, input.input1, input.input2].some(
+            (uri: any) => typeof uri.fsPath === 'string' && uri.fsPath.startsWith(dir),
+          );
+          if (isMine) {
+            vscode.window.tabGroups.close(tab).then(undefined, () => {});
+          }
+        }
+      }
+    }
   }
 
   // ── HTML ───────────────────────────────────────────────────────────────
@@ -238,7 +278,7 @@ function initEditMode() {
     message: r.querySelector('.pending-msg').textContent
   }));
 
-  document.getElementById('editControls').style.display = 'flex';
+  document.getElementById('editControls').style.display = 'inline-flex';
   document.getElementById('editToggle').textContent = 'Editing...';
   document.querySelectorAll('.drag-handle').forEach(h => h.classList.add('active'));
   document.querySelectorAll('.action-select').forEach(s => s.disabled = false);
@@ -429,19 +469,34 @@ function cancelEdit() {
 
     for (let i = 0; i < s.pendingCommits.length; i++) {
       const c = s.pendingCommits[i];
-      const isTop = i === 0;
+      const isFirst = i === 0;
+      const isLast = i === s.pendingCommits.length - 1;
       const action = c.action ?? 'pick';
 
       const optionsHtml = actions.map(a =>
         `<option value="${a}"${a === action ? ' selected' : ''}>${a}</option>`
       ).join('');
 
+      // Last pending commit gets the edit button inline
+      const editBtn = isLast
+        ? `<span class="pending-edit-inline">
+            <button class="btn btn-edit" id="editToggle" onclick="toggleEditMode()">Edit</button>
+            <span class="edit-controls" id="editControls" style="display:none;">
+              <button class="btn btn-apply" onclick="applyEdits()">Apply Changes</button>
+              <button class="btn btn-cancel" onclick="cancelEdit()">Cancel</button>
+            </span>
+          </span>`
+        : '';
+
+      // Orange rail: cap top on first (nothing above), line continues down to separator/divergence
+      const featCap = isFirst ? 'rail-cap-top' : '';
+
       rows.push(`<div class="pending-row row-pending" data-hash="${this.esc(c.hash)}" draggable="false">
         <div class="gc-main-content"></div>
-        <div class="gc-main-rail"></div>
+        <div class="gc-main-rail"><div class="rail rail-main rail-no-node"></div></div>
         <div class="gc-gutter"></div>
         <div class="gc-feat-rail">
-          <div class="rail rail-feature ${isTop ? 'rail-cap-top' : ''}">
+          <div class="rail rail-feature ${featCap}">
             <div class="node node-feature"></div>
           </div>
         </div>
@@ -450,33 +505,14 @@ function cancelEdit() {
           <select class="action-select" disabled onchange="onActionChange(this)">${optionsHtml}</select>
           <span class="hash hash-feature">${this.esc(c.shortHash)}</span>
           <span class="pending-msg">${this.esc(c.message)}</span>
+          ${editBtn}
         </div>
       </div>`);
     }
 
     return `<div class="section section-pending">
-      <div class="pending-row">
-        <div class="gc-main-content"></div>
-        <div class="gc-main-rail"></div>
-        <div class="gc-gutter"></div>
-        <div class="gc-feat-rail"></div>
-        <div class="gc-feat-content section-label-pending">Pending</div>
-      </div>
       <div id="pendingList">
         ${rows.join('\n')}
-      </div>
-      <div class="pending-row pending-controls-row">
-        <div class="gc-main-content"></div>
-        <div class="gc-main-rail"></div>
-        <div class="gc-gutter"></div>
-        <div class="gc-feat-rail"></div>
-        <div class="gc-feat-content edit-controls-wrap">
-          <button class="btn btn-edit" id="editToggle" onclick="toggleEditMode()">Edit</button>
-          <div class="edit-controls" id="editControls" style="display:none;">
-            <button class="btn btn-apply" onclick="applyEdits()">Apply Changes</button>
-            <button class="btn btn-cancel" onclick="cancelEdit()">Cancel</button>
-          </div>
-        </div>
       </div>
     </div>`;
   }
@@ -960,12 +996,7 @@ body {
   align-items: stretch;
   min-height: 36px;
 }
-.section-label-pending {
-  font-size: 10px; letter-spacing: .08em;
-  text-transform: uppercase; color: var(--muted);
-  padding: 6px 0 4px 8px;
-  align-self: end;
-}
+.section-pending { margin: 0; }
 .pending-content {
   display: flex; align-items: center; gap: 6px;
   padding: 4px 0 4px 8px;
@@ -1006,13 +1037,12 @@ body {
 .row-dropped .pending-msg { text-decoration: line-through; opacity: .4; }
 .row-dropped .hash { opacity: .4; }
 
-/* Edit controls */
-.pending-controls-row { min-height: auto; padding-bottom: 4px; }
-.edit-controls-wrap {
-  display: flex; gap: 6px; align-items: center;
-  padding: 4px 0 4px 8px;
+/* Edit controls (inline with last pending commit) */
+.pending-edit-inline {
+  display: inline-flex; gap: 6px; align-items: center;
+  margin-left: auto; flex-shrink: 0;
 }
-.edit-controls { display: flex; gap: 6px; }
+.edit-controls { display: inline-flex; gap: 6px; }
 .btn-edit {
   border-color: var(--feature); color: var(--feature);
   background: rgba(232,148,58,.08);

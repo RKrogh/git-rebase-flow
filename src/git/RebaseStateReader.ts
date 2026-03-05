@@ -109,9 +109,27 @@ export class RebaseStateReader {
   /** Resolve a sha to a friendly branch name for display only. */
   private resolveTargetName(sha: string): string {
     if (!sha) { return 'unknown'; }
-    const name = this.git.tryExec(['name-rev', '--name-only', '--no-undefined', sha]);
-    // name-rev can return things like "master~0" — strip the ~0
-    if (name) { return name.replace(/~0$/, ''); }
+
+    // Strategy 1: find a branch whose tip is exactly this commit.
+    // This is the most reliable — avoids worktree/HEAD ref noise.
+    const branches = this.git.tryExec([
+      'for-each-ref', '--points-at', sha,
+      '--format=%(refname:short)', 'refs/heads/',
+    ]);
+    if (branches) {
+      const list = branches.split('\n').filter(Boolean);
+      // Prefer common target names when multiple branches point here
+      const preferred = list.find(b => /^(main|master|develop)$/i.test(b));
+      if (preferred) { return preferred; }
+      if (list.length > 0) { return list[0]; }
+    }
+
+    // Strategy 2: name-rev restricted to branch refs only (skips worktree HEADs)
+    const name = this.git.tryExec([
+      'name-rev', '--name-only', '--no-undefined', '--refs=refs/heads/*', sha,
+    ]);
+    if (name) { return name.replace(/~\d+$/, ''); }
+
     return sha.substring(0, 7);
   }
 
