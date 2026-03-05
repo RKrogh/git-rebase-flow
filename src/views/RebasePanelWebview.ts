@@ -59,10 +59,13 @@ export class RebasePanelWebview implements vscode.Disposable {
     const divergenceSection = this.buildDivergenceSection(s, conflictBaseHashes);
     const forkSection = this.buildForkSection(s);
 
-    // Separator: main rail passes through, dashed line to the right
-    const separator = `<div class="separator-wrap">
-      <div class="rail rail-main rail-no-node separator-rail"></div>
-      <div class="separator-line"></div>
+    // Separator: dashed line across, main rail passes through at column 2
+    const separator = `<div class="separator-grid">
+      <div></div>
+      <div><div class="rail rail-main rail-no-node separator-rail"></div></div>
+      <div></div>
+      <div></div>
+      <div></div>
     </div>`;
 
     return /* html */ `<!DOCTYPE html>
@@ -138,7 +141,7 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
       if (hasConflict && c.conflictFiles?.length) {
         const hasAnyCausation = c.conflictFiles.some(f => (causationByFile.get(f) ?? []).length > 0);
 
-        conflictHtml = `<div class="file-list">${
+        conflictHtml = `<div class="file-list file-list-right">${
           c.conflictFiles.map(f => {
             const bases = causationByFile.get(f) ?? [];
             const from = bases.length
@@ -163,17 +166,19 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
 
       const meta = [c.author, c.date].filter(Boolean).join(' \u00B7 ');
 
-      rows.push(`<div class="row">
-        <div class="rail rail-replay rail-cap-top">
-          <div class="node ${hasConflict ? 'node-conflict' : 'node-replay'}"></div>
-        </div>
-        <div class="content">
-          <div class="commit-top">
+      rows.push(`<div class="rebased-row row-waxing">
+        <div class="gc-main-content content-rebased">
+          <div class="commit-top commit-top-right">
             <span class="hash">${this.esc(c.shortHash)}</span> ${badge}
           </div>
-          <div class="msg">${this.esc(c.message)}</div>
-          ${meta ? `<div class="meta">${this.esc(meta)}</div>` : ''}
+          <div class="msg msg-right">${this.esc(c.message)}</div>
+          ${meta ? `<div class="meta meta-right">${this.esc(meta)}</div>` : ''}
           ${conflictHtml}
+        </div>
+        <div class="gc-main-rail">
+          <div class="rail rail-replay rail-cap-top">
+            <div class="node ${hasConflict ? 'node-conflict' : 'node-replay'}"></div>
+          </div>
         </div>
       </div>`);
       isFirstRow = false;
@@ -193,27 +198,31 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
 
       const meta = [c.author, c.date].filter(Boolean).join(' \u00B7 ');
 
-      rows.push(`<div class="row">
-        <div class="rail rail-new ${capTop}">
-          <div class="node node-new"></div>
+      rows.push(`<div class="rebased-row row-settled-in">
+        <div class="gc-main-content content-rebased">
+          <div class="commit-top commit-top-right">${hashHtml} <span class="badge badge-done">\u2713 applied</span></div>
+          <div class="msg msg-right">${this.esc(c.message)}</div>
+          ${meta ? `<div class="meta meta-right">${this.esc(meta)}</div>` : ''}
         </div>
-        <div class="content">
-          <div class="commit-top">${hashHtml} <span class="badge badge-done">\u2713 applied</span></div>
-          <div class="msg">${this.esc(c.message)}</div>
-          ${meta ? `<div class="meta">${this.esc(meta)}</div>` : ''}
+        <div class="gc-main-rail">
+          <div class="rail rail-new ${capTop}">
+            <div class="node node-new"></div>
+          </div>
         </div>
       </div>`);
     }
 
     return `<div class="section">
-      <div class="section-label">Rebased (new)</div>
+      <div class="rebased-row">
+        <div class="section-label">Rebased (new)</div>
+      </div>
       ${rows.join('\n')}
     </div>`;
   }
 
   // ── Section 4: Divergence (main + feature side by side) ───────────────
-  // 5-column grid: [main-rail 32px] [main-content 1fr] [gutter] [feat-rail 32px] [feat-content 1fr]
-  // Main rail stays at 0-32px — same position as new/replay/separator sections.
+  // 5-column grid: [main-content 1fr] [main-rail 32px] [gutter] [feat-rail 32px] [feat-content 1fr]
+  // Text flanks outward: target text left of main rail, feature text right of feature rail.
 
   private buildDivergenceSection(
     s: RebaseState,
@@ -231,17 +240,17 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
 
     const gridRows: string[] = [];
 
-    // Header row — main rail gets continuous no-node rail, feature rail empty
+    // Header row — main-content first (col 1), then main-rail (col 2)
+    gridRows.push(`<div class="gc-main-content div-hdr div-hdr-left">Target (${this.esc(s.targetRef)})</div>`);
     gridRows.push(`<div class="gc-main-rail">
       <div class="rail rail-main rail-no-node ${nothingAbove ? 'rail-cap-top' : ''}"></div>
     </div>`);
-    gridRows.push(`<div class="gc-main-content div-hdr div-hdr-left">Target (${this.esc(s.targetRef)})</div>`);
     gridRows.push('<div class="gc-gutter"></div>');
     gridRows.push('<div class="gc-feat-rail"></div>');
     gridRows.push(`<div class="gc-feat-content div-hdr">Original commits</div>`);
 
     for (let i = 0; i < maxRows; i++) {
-      // ── Main rail + content (columns 1-2) ──
+      // ── Main content + rail (columns 1-2) ──
       if (i < s.baseCommits.length) {
         const c = s.baseCommits[i];
         const isCausation = conflictBaseHashes.has(c.hash);
@@ -255,11 +264,6 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
           }</div>`;
         }
 
-        gridRows.push(`<div class="gc-main-rail">
-          <div class="rail rail-main">
-            <div class="node ${isCausation ? 'node-causation' : 'node-main'}"></div>
-          </div>
-        </div>`);
         gridRows.push(`<div class="gc-main-content ${isCausation ? 'row-causation' : ''}">
           <div class="commit-top commit-top-right">
             ${isCausation ? '<span class="badge badge-causation">\u26A1 conflict source</span>' : ''}
@@ -269,11 +273,13 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
           ${meta ? `<div class="meta meta-right">${this.esc(meta)}</div>` : ''}
           ${causationHtml}
         </div>`);
-      } else {
-        // Main rail continues (no node) — keeps the line flowing to the fork
         gridRows.push(`<div class="gc-main-rail">
-          <div class="rail rail-main rail-no-node"></div>
+          <div class="rail rail-main">
+            <div class="node ${isCausation ? 'node-causation' : 'node-main'}"></div>
+          </div>
         </div>`);
+      } else {
+        // Main content + rail continues (no node)
         if (i === 0 && s.baseCommits.length === 0) {
           const forkShort = s.forkPointHash ? s.forkPointHash.substring(0, 7) : 'null';
           const ontoShort = s.ontoHash ? s.ontoHash.substring(0, 7) : 'null';
@@ -287,6 +293,9 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
         } else {
           gridRows.push('<div class="gc-main-content"></div>');
         }
+        gridRows.push(`<div class="gc-main-rail">
+          <div class="rail rail-main rail-no-node"></div>
+        </div>`);
       }
 
       // ── Gutter (column 3) ──
@@ -298,7 +307,6 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
         const isTop = i === 0;
         const isDone = c.status === 'done';
         const isCurrent = c.status === 'current';
-        const faded = isDone;
 
         const nodeCls = isCurrent ? 'node-feature-current'
           : isDone ? 'node-feature-faded'
@@ -309,12 +317,16 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
         else if (isCurrent) { badge = '<span class="badge badge-current-replay">\u26A1 replaying</span>'; }
         else                { badge = '<span class="badge badge-pending">pending</span>'; }
 
-        gridRows.push(`<div class="gc-feat-rail ${faded ? 'row-faded' : ''}">
+        const rowAnim = isDone ? 'row-settled-out'
+          : isCurrent ? 'row-waning'
+          : '';
+
+        gridRows.push(`<div class="gc-feat-rail ${rowAnim}">
           <div class="rail rail-feature ${isTop ? 'rail-cap-top' : ''}">
             <div class="node ${nodeCls}"></div>
           </div>
         </div>`);
-        gridRows.push(`<div class="gc-feat-content ${faded ? 'row-faded' : ''}">
+        gridRows.push(`<div class="gc-feat-content ${rowAnim}">
           <div class="commit-top">
             <span class="hash hash-feature">${this.esc(c.shortHash)}</span> ${badge}
           </div>
@@ -343,18 +355,20 @@ function openFile(f) { vscode.postMessage({ command: 'openFile', file: f }); }
   private buildForkSection(s: RebaseState): string {
     return `<div class="section section-fork">
       <div class="fork-grid">
-        <div class="gc-main-rail" style="grid-column:1; grid-row:1;">
+        <div style="grid-column:1; grid-row:1;"></div>
+        <div class="gc-main-rail" style="grid-column:2; grid-row:1;">
           <div class="rail rail-main rail-cap-bottom">
             <div class="node node-fork"></div>
           </div>
         </div>
-        <div class="gc-fork-branch" style="grid-column:2/5; grid-row:1;">
+        <div class="gc-fork-branch" style="grid-column:3/5; grid-row:1;">
           <div class="fork-branch-curve"></div>
           <span class="fork-text">Fork \u00B7 ${this.esc(s.forkPointHash.substring(0, 7))}</span>
         </div>
         <div style="grid-column:5; grid-row:1;"></div>
       </div>
       <div class="history-row">
+        <div></div>
         <div class="rail rail-history"></div>
       </div>
     </div>`;
@@ -419,16 +433,18 @@ body {
 .section-label {
   font-size: 10px; letter-spacing: .08em;
   text-transform: uppercase; color: var(--muted);
-  padding: 6px 0 4px calc(var(--rail-w) + 8px);
+  padding: 6px 8px 4px 0;
+  text-align: right;
 }
 
-/* ── Single-column rows (new section, replay section) ── */
-.row {
-  display: flex;
+/* ── Rebased rows (same 5-col grid, content in col 1, rail in col 2) ── */
+.rebased-row {
+  display: grid;
+  grid-template-columns: 1fr var(--rail-w) 12px var(--rail-w) 1fr;
   align-items: stretch;
   min-height: 44px;
 }
-.content { flex: 1; min-width: 0; padding: 6px 0 6px 10px; }
+.content-rebased { padding: 6px 8px; min-width: 0; }
 .commit-top { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 .msg { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
 .meta { font-size: 11px; color: var(--muted); }
@@ -459,6 +475,29 @@ body {
 /* Row states */
 .row-faded { opacity: .4; }
 .row-causation { background: rgba(240,96,96,.05); border-radius: 3px; }
+
+/* ── Migration animations (wax/wane between orange→blue rails) ── */
+@keyframes breathe-wax {
+  0%, 100% { opacity: .35; }
+  50%      { opacity: 1; }
+}
+@keyframes breathe-wane {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .35; }
+}
+@keyframes settle-in {
+  from { opacity: .35; }
+  to   { opacity: 1; }
+}
+@keyframes settle-out {
+  from { opacity: 1; }
+  to   { opacity: .4; }
+}
+
+.row-waxing      { animation: breathe-wax 4s ease-in-out infinite; }
+.row-waning      { animation: breathe-wane 4s ease-in-out infinite; }
+.row-settled-in  { animation: settle-in 1.6s ease-out; }
+.row-settled-out { animation: settle-out 1.6s ease-out forwards; }
 
 /* ── Rails (vertical metro lines + nodes) ── */
 .rail {
@@ -530,36 +569,34 @@ body {
 .node-feature-faded   { border: 2px solid var(--feature); background: var(--bg); opacity: .5; }
 .node-fork            { border: 2px solid var(--fork);    background: var(--fork);    box-shadow: 0 0 8px var(--fork); width: 14px; height: 14px; }
 
-/* ── Separator (main rail passes through, dashed line to the right) ── */
-.separator-wrap {
-  display: flex;
-  align-items: stretch;
+/* ── Separator (dashed line across, main rail passes through at col 2) ── */
+.separator-grid {
+  display: grid;
+  grid-template-columns: 1fr var(--rail-w) 12px var(--rail-w) 1fr;
   min-height: 24px;
-}
-.separator-rail {
-  min-height: 24px;
-}
-.separator-line {
-  flex: 1;
   position: relative;
 }
-.separator-line::after {
+.separator-grid::after {
   content: '';
   position: absolute;
   top: 50%; left: 0; right: 0;
   border-top: 1px dashed var(--border);
   opacity: .5;
+  pointer-events: none;
+}
+.separator-rail {
+  min-height: 24px;
 }
 
-/* ── Divergence grid (5 columns, main rail stays at left edge) ── */
+/* ── Divergence grid (5 columns, text flanks outward from central rails) ── */
 .divergence-grid {
   display: grid;
-  grid-template-columns: var(--rail-w) 1fr 12px var(--rail-w) 1fr;
+  grid-template-columns: 1fr var(--rail-w) 12px var(--rail-w) 1fr;
   align-items: stretch;
 }
 /* Grid cell types */
 .gc-main-rail    { display: flex; justify-content: center; }
-.gc-main-content { padding: 6px 8px 6px 0; text-align: right; min-width: 0; }
+.gc-main-content { padding: 6px 8px; text-align: right; min-width: 0; }
 .gc-gutter       { }
 .gc-feat-rail    { display: flex; justify-content: center; }
 .gc-feat-content { padding: 6px 0 6px 8px; min-width: 0; }
@@ -601,7 +638,7 @@ body {
 /* ── Fork section (same 5-col grid as divergence) ── */
 .fork-grid {
   display: grid;
-  grid-template-columns: var(--rail-w) 1fr 12px var(--rail-w) 1fr;
+  grid-template-columns: 1fr var(--rail-w) 12px var(--rail-w) 1fr;
 }
 .gc-fork-branch {
   position: relative;
@@ -629,7 +666,8 @@ body {
 }
 
 .history-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr var(--rail-w) 12px var(--rail-w) 1fr;
 }
 
 /* ── Controls ── */
