@@ -1,6 +1,6 @@
 # RebaseFlow
 
-<img width="1319" height="824" alt="image" src="https://github.com/user-attachments/assets/e074d49e-db32-481c-ac42-8f8e699255e0" />
+<img width="1309" height="1282" alt="image" src="https://github.com/user-attachments/assets/69a36269-affb-41de-a024-fa54b8255f09" />
 
 A VS Code extension that makes `git rebase` not suck.
 
