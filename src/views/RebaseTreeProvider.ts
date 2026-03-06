@@ -94,7 +94,11 @@ export class RebaseTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     }
 
     for (const c of s.pendingCommits) {
-      nodes.push(new CommitItem(c));
+      const item = new CommitItem(c);
+      if (c.action && c.action !== 'pick') {
+        item.description = `[${c.action}] ${c.shortHash}`;
+      }
+      nodes.push(item);
     }
 
     return nodes;

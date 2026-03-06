@@ -8,6 +8,7 @@ export class RebaseStateWatcher implements vscode.Disposable {
   private readonly reader: RebaseStateReader;
   private debounceTimer: ReturnType<typeof setTimeout> | undefined;
   private currentState: RebaseState = { ...emptyState };
+  private suppressUntil = 0;
 
   private readonly _onStateChanged = new vscode.EventEmitter<RebaseState>();
   readonly onStateChanged = this._onStateChanged.event;
@@ -50,10 +51,18 @@ export class RebaseStateWatcher implements vscode.Disposable {
 
   get state(): RebaseState { return this.currentState; }
 
+  /** Temporarily suppress refreshes (e.g., after writing the todo file) */
+  suppressFor(ms: number): void {
+    this.suppressUntil = Date.now() + ms;
+  }
+
   private scheduleRefresh(delay = 120): void {
     // Debounce: watcher can fire multiple times for a single git operation
     if (this.debounceTimer) { clearTimeout(this.debounceTimer); }
-    this.debounceTimer = setTimeout(() => this.refresh(), delay);
+    this.debounceTimer = setTimeout(() => {
+      if (Date.now() < this.suppressUntil) { return; }
+      this.refresh();
+    }, delay);
   }
 
   private refresh(): void {
