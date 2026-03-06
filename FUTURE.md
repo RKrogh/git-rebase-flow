@@ -93,10 +93,20 @@ The webview uses CSS `::before` (line above node) and `::after` (line below node
 
 After a conflict is resolved and the rebase continues, merge editor tabs become stale (temp files may be invalid). Solution: detect conflict state changes in `update()` by comparing `currentCommit.hash`, and proactively close merge editor tabs whose input URIs point to our temp directory. Duck-type `TabInputTextMerge` since it's not in @types/vscode@1.85 — check for `input.base.fsPath && input.input1.fsPath && input.input2.fsPath`.
 
-## Watcher Self-Trigger
+## Watcher Self-Trigger & Force Refresh
 
-Writing to `git-rebase-todo` triggers the FileSystemWatcher which rebuilds state and stomps the UI. `RebaseStateWatcher.suppressFor(400)` prevents this. Call it before writing.
+Writing to `git-rebase-todo` triggers the FileSystemWatcher which rebuilds state and stomps the UI. Pattern: call `suppressFor(400)` before writing (prevents the file-watcher from double-firing), then `forceRefresh()` after writing (explicit re-read + event fire, bypasses suppression). This replaced an earlier timer-based approach that was unreliable.
 
 ## Interactive Editing DOM Stability
 
 The `isEditing` flag on the extension side prevents `update()` from rebuilding the webview HTML while the user is dragging/editing pending commits. Edit state lives entirely in webview JS (`pendingEdits` array). Only sent to extension on "Apply Changes".
+
+On Cancel, `forceRebuild()` rebuilds from `currentState` (the last state before editing). On Apply, `forceRefresh()` re-reads from disk so the new todo order is reflected.
+
+## VS Code Webview HTML Caching
+
+Setting `webview.html` to the same string it already contains is a **silent no-op** — VS Code detects the identical string and skips the page reload. This is a problem when Cancel needs to reset DOM changes (drag reorder) but the underlying state hasn't changed, so `buildHtml()` produces the same output. Fix: a `rebuildNonce` counter is injected as `<meta name="rebuild" content="N">` and incremented in `forceRebuild()`, ensuring each call produces a unique HTML string.
+
+## Drag-and-Drop Rail Continuity
+
+After HTML5 drag-and-drop reorders pending rows, the `rail-cap-top` CSS class (which hides the line-above-node pseudo-element) stays stuck on whichever row was originally first. The webview JS `updateRailCaps()` function re-evaluates the DOM order on `dragend` and moves the class to the actual first row.

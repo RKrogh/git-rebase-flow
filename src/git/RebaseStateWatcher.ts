@@ -51,9 +51,14 @@ export class RebaseStateWatcher implements vscode.Disposable {
 
   get state(): RebaseState { return this.currentState; }
 
-  /** Temporarily suppress refreshes (e.g., after writing the todo file) */
+  /** Temporarily suppress automatic refreshes (e.g., after writing the todo file) */
   suppressFor(ms: number): void {
     this.suppressUntil = Date.now() + ms;
+  }
+
+  /** Force an immediate re-read from disk + event fire, bypassing suppression. */
+  forceRefresh(): void {
+    this.refresh();
   }
 
   private scheduleRefresh(delay = 120): void {
