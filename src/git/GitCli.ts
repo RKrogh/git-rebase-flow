@@ -82,4 +82,11 @@ export class GitCli {
     const path = require('path') as typeof import('path');
     return fs.existsSync(path.join(this.gitDir, relativePath));
   }
+
+  /** Read a file at a specific index stage: 1=base, 2=ours (target), 3=theirs (feature) */
+  readIndexStage(file: string, stage: 1 | 2 | 3): string | null {
+    return this.tryExec(['show', `:${stage}:${file}`]);
+  }
+
+  get workspaceRoot(): string { return this.repoRoot; }
 }
