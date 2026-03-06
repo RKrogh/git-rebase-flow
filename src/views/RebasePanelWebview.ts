@@ -8,6 +8,7 @@ export class RebasePanelWebview implements vscode.Disposable {
   private git: GitCli | null = null;
   private currentState: RebaseState | null = null;
   private tmpDir: string | null = null;
+  private rebuildNonce = 0;
 
   setGit(git: GitCli): void { this.git = git; }
 
@@ -36,10 +37,13 @@ export class RebasePanelWebview implements vscode.Disposable {
             break;
           case 'exitEditMode':
             this.isEditing = false;
+            if (this.currentState) { this.forceRebuild(this.currentState); }
             break;
           case 'editTodo':
             this.isEditing = false;
             vscode.commands.executeCommand('rebaseflow.applyTodoEdits', { edits: msg.edits });
+            // The command calls watcher.forceRefresh() after writing,
+            // which fires onStateChanged → update() with fresh state.
             break;
           default:
             vscode.commands.executeCommand(`rebaseflow.${msg.command}`);
@@ -61,6 +65,15 @@ export class RebasePanelWebview implements vscode.Disposable {
     }
 
     this.currentState = state;
+    this.panel.webview.html = this.buildHtml(state);
+  }
+
+  /** Force a full HTML rebuild, bypassing the isEditing guard.
+   *  Bumps rebuildNonce so VS Code sees a different HTML string
+   *  (it skips the reload when the string is identical). */
+  private forceRebuild(state: RebaseState): void {
+    if (!this.panel) { return; }
+    this.rebuildNonce++;
     this.panel.webview.html = this.buildHtml(state);
   }
 
@@ -219,6 +232,7 @@ export class RebasePanelWebview implements vscode.Disposable {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="rebuild" content="${this.rebuildNonce}">
 <meta http-equiv="Content-Security-Policy"
   content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 <style>${this.css()}</style>
@@ -266,6 +280,7 @@ function toggleEditMode() {
     vscode.postMessage({ command: 'enterEditMode' });
     initEditMode();
   } else {
+    exitEditUi();
     vscode.postMessage({ command: 'exitEditMode' });
   }
 }
@@ -313,6 +328,7 @@ function setupDragAndDrop() {
     });
     row.addEventListener('dragend', () => {
       row.classList.remove('dragging');
+      updateRailCaps();
       updatePendingEditsFromDom();
     });
   });
@@ -327,6 +343,20 @@ function updatePendingEditsFromDom() {
   }));
 }
 
+/** Update rail-cap-top so only the first pending row has it, and fix end node */
+function updateRailCaps() {
+  const rows = document.querySelectorAll('#pendingList .row-pending');
+  rows.forEach((r, i) => {
+    const rail = r.querySelector('.rail.rail-feature');
+    if (!rail) return;
+    if (i === 0) {
+      rail.classList.add('rail-cap-top');
+    } else {
+      rail.classList.remove('rail-cap-top');
+    }
+  });
+}
+
 function onActionChange(sel) {
   if (!editMode) return;
   updatePendingEditsFromDom();
@@ -336,12 +366,25 @@ function onActionChange(sel) {
 
 function applyEdits() {
   updatePendingEditsFromDom();
+  exitEditUi();
   vscode.postMessage({ command: 'editTodo', edits: pendingEdits });
   editMode = false;
 }
 
+function exitEditUi() {
+  document.getElementById('editControls').style.display = 'none';
+  document.getElementById('editToggle').textContent = 'Edit';
+  document.querySelectorAll('.drag-handle').forEach(h => h.classList.remove('active'));
+  document.querySelectorAll('.action-select').forEach(s => s.disabled = true);
+  document.querySelectorAll('.row-pending').forEach(r => {
+    r.setAttribute('draggable', 'false');
+    r.classList.remove('row-dropped');
+  });
+}
+
 function cancelEdit() {
   editMode = false;
+  exitEditUi();
   vscode.postMessage({ command: 'exitEditMode' });
 }
 </script>

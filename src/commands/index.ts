@@ -62,6 +62,8 @@ export function registerCommands(context: vscode.ExtensionContext, watcher?: Reb
       const git = new GitCli(root);
       const writer = new RebaseTodoWriter(git);
 
+      // Suppress the file-watcher to avoid a double-refresh,
+      // then force a single authoritative re-read after writing.
       watcher?.suppressFor(400);
 
       const result = writer.writeTodo(payload.edits);
@@ -73,9 +75,11 @@ export function registerCommands(context: vscode.ExtensionContext, watcher?: Reb
         } else {
           vscode.window.showWarningMessage('RebaseFlow: No active rebase found.');
         }
+        watcher?.forceRefresh();
         return;
       }
 
+      watcher?.forceRefresh();
       vscode.window.showInformationMessage(
         `RebaseFlow: Updated ${payload.edits.length} pending commits.`
       );
