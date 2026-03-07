@@ -32,13 +32,9 @@ Show a compact inline diff of each conflict hunk directly in the panel (collapse
 
 ---
 
-## Upgrade @types/vscode
+## @types/vscode — TabInputTextMerge
 
-Currently pinned at 1.85. Upgrading would give us:
-- `TabInputTextMerge` class (proper type instead of duck-typing in `closeStaleMergeEditors`)
-- Potentially other newer API surface
-
-Check min engine version compatibility before upgrading.
+`TabInputTextMerge` was never added to `@types/vscode` (checked through v1.109). The merge editor tab input falls under `unknown` in the `Tab.input` union type. The duck-typing approach in `closeStaleMergeEditors()` is the correct permanent solution, not a workaround.
 
 ---
 

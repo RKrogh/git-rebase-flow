@@ -15,7 +15,8 @@ RebaseFlow is a VS Code extension that provides a visual interface for git rebas
 ```bash
 npm run compile        # TypeScript → out/ (tsc -p ./)
 npm run watch          # Live recompile during development
-npm test               # Run tests (not yet implemented)
+npm test               # Compile + run Mocha unit tests
+npm run test:unit      # Same as npm test
 ```
 
 **Package & install locally:**
@@ -47,8 +48,12 @@ RebaseStateWatcher (monitors .git/rebase-merge/*)
 - **`src/git/RebaseStateWatcher.ts`** — FileSystemWatcher with debounce, emits state change events. Has `suppressFor(ms)` to prevent self-triggering after writes, and `forceRefresh()` for explicit re-reads.
 - **`src/git/RebaseTodoWriter.ts`** — Writes modified todo list back to `git-rebase-todo`. Validates hashes against current state to reject stale edits.
 - **`src/views/RebaseTreeProvider.ts`** — VS Code `TreeDataProvider` for SCM sidebar. Shows `[action]` prefix for non-pick pending commits.
-- **`src/views/RebasePanelWebview.ts`** — Full webview panel with inline HTML/CSS/JS graph. Includes merge editor integration, pending commit editing, and stale-tab cleanup.
+- **`src/views/RebasePanelWebview.ts`** — Panel lifecycle, merge editor integration, and HTML composition. Imports pure rendering functions from `webview/*`.
+- **`src/views/webview/styles.ts`** — CSS generation (`webviewCss()`). Pure function, no vscode dependency.
+- **`src/views/webview/script.ts`** — Client-side JS (`webviewScript()`). Edit mode, drag-and-drop, action handlers.
+- **`src/views/webview/sections.ts`** — HTML section builders (`buildRebasedSection`, `buildPendingSection`, `buildDivergenceSection`, `buildForkSection`). Pure functions taking `RebaseState`, no vscode dependency.
 - **`src/commands/index.ts`** — Continue/skip/abort/applyTodoEdits command handlers. `applyTodoEdits` writes todo then calls `watcher.forceRefresh()` to propagate new state.
+- **`src/test/unit/`** — Mocha unit tests. `RebaseStateReader.test.ts` (~30 tests), `RebaseTodoWriter.test.ts` (~8 tests), `helpers.ts` (mock GitCli factory). Tests cover modules that don't import vscode directly.
 
 ### Key Design Decisions
 
@@ -102,7 +107,7 @@ Pending commits can be reordered (HTML5 drag-and-drop) and have their action cha
 
 - `rebase-merge` format only (standard rebase and `-i` flags; no `rebase-apply`)
 - Single-root workspaces only
-- `@types/vscode` pinned at 1.85 — `TabInputTextMerge` not available, duck-typed instead
+- `@types/vscode` pinned at 1.85 — `TabInputTextMerge` was never added to any version (checked through 1.109); duck-typing is the permanent solution
 - `_open.mergeEditor` is an internal VS Code command (prefixed `_`) — could break in future VS Code versions
 
 ## Conventions

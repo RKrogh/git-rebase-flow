@@ -10,6 +10,7 @@ Persistent side panel showing the full rebase graph — where you've been, where
 
 - **Visual git graph** — colored rail lines showing target base, fork point, your rebased commits, and original branch side-by-side
 - **Conflict causation** — highlights which target commits caused each conflict
+- **Interactive rebase editing** — reorder pending commits via drag-and-drop, change actions (pick/reword/edit/squash/fixup/drop)
 - **Auto-activates** on rebase start, auto-closes on finish
 - **Continue / Skip / Abort** controls with abort confirmation
 - **Reactive** — updates instantly as you resolve files
@@ -70,10 +71,10 @@ Re-open a closed panel: `Ctrl+Shift+P` → `RebaseFlow: Open Panel`
 |---|---|
 | `git.path` | Custom path to git executable |
 
-## Limitations (v0.1)
+## Limitations
 
 - `rebase-merge` format only (standard `git rebase` and `-i`). `rebase-apply` not yet supported.
-- Conflict resolution uses VS Code's native editor. Custom ours/theirs diff planned for v0.2.
+- Conflict resolution delegates to VS Code's merge editor (with custom labeled panes).
 - Single-root workspaces only (multi-root uses first folder).
 
 ## Project structure
@@ -86,17 +87,23 @@ src/
     GitCli.ts               # git shell wrapper
     RebaseStateReader.ts    # .git/rebase-merge/* → RebaseState
     RebaseStateWatcher.ts   # FileSystemWatcher + debounce
+    RebaseTodoWriter.ts     # writes modified todo list
   views/
     RebaseTreeProvider.ts   # SCM sidebar tree
-    RebasePanelWebview.ts   # editor webview panel
+    RebasePanelWebview.ts   # panel lifecycle + merge editor
+    webview/
+      sections.ts           # HTML section builders (pure)
+      styles.ts             # CSS generation (pure)
+      script.ts             # client-side JS (pure)
   commands/index.ts         # continue / skip / abort
+  test/
+    unit/                   # mocha unit tests
 ```
 
 ## Roadmap
 
 - **v0.2** — Custom two-pane conflict diff (ours vs theirs)
 - **v0.3** — Per-hunk accept ours/theirs buttons
-- **v0.4** — Interactive rebase todo list editor
 - **v1.0** — Marketplace publish
 
 ## Contributing
